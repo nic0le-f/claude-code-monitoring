@@ -1,0 +1,33 @@
+# claude-code-monitor — budget / context thresholds.
+#
+# Values are advisory only; hooks never block the session.
+# Per-project sections override [defaults]. Match is exact on the session CWD.
+
+[defaults]
+# Context thresholds (current prompt size, i.e. what gets sent on the next turn).
+context_warn_tokens   = 100_000   # soft warning — long context getting expensive
+context_alarm_tokens  = 150_000   # red — strongly consider starting a fresh session
+
+# Cumulative session cost (USD, standard-tier estimate).
+session_soft_usd      = 5.0       # notification only
+session_loud_usd      = 15.0      # notification + terminal warning
+session_alarm_usd     = 30.0      # notification + terminal warning (louder wording)
+
+# Sonnet-nudge rule (used by the TUI Issues panel, not the hooks).
+# When ≥ `sonnet_nudge_min_turns` recent tool calls exist and the mechanical-work
+# ratio (Bash/Grep/Read/Edit / total) is ≥ `sonnet_nudge_tool_ratio`, flag the
+# session as Opus-overkill.
+sonnet_nudge_min_turns  = 20
+sonnet_nudge_tool_ratio = 0.8
+
+# Example per-project overrides — add sections for your own project paths:
+#
+# [project."/path/to/ml-research"]
+# # Long-context work is legitimate here; raise the bar.
+# session_loud_usd  = 30.0
+# session_alarm_usd = 50.0
+#
+# [project."/path/to/config-repo"]
+# # Config/meta-work — should rarely need big budgets.
+# session_loud_usd  = 10.0
+# session_alarm_usd = 20.0

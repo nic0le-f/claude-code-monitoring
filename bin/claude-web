@@ -1,0 +1,85 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# requires-python = ">=3.12"
+# dependencies = ["fastapi>=0.110", "uvicorn>=0.27"]
+# ///
+"""claude-web — Web dashboard for Claude Code sessions.
+
+Usage:
+    claude-web              # starts on http://localhost:7899, auto-opens browser
+    claude-web --port 8080  # custom port
+    claude-web --no-open    # don't auto-open browser
+"""
+
+import argparse
+import asyncio
+import json
+import sys
+import threading
+import time
+import webbrowser
+from pathlib import Path
+
+import uvicorn
+from fastapi import FastAPI
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from lib.api import snapshot as _snapshot  # noqa: E402
+
+app = FastAPI(title="claude-monitor")
+STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
+
+
+@app.get("/")
+def index():
+    return HTMLResponse((STATIC_DIR / "index.html").read_text())
+
+
+@app.get("/api/snapshot")
+def api_snapshot():
+    return JSONResponse(_snapshot(), headers={"Cache-Control": "no-cache"})
+
+
+@app.get("/events")
+async def events():
+    async def stream():
+        while True:
+            try:
+                data = json.dumps(_snapshot(), default=str)
+                yield f"data: {data}\n\n"
+            except Exception as exc:
+                yield f"data: {json.dumps({'error': str(exc)})}\n\n"
+            await asyncio.sleep(2)
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Claude Code web dashboard")
+    parser.add_argument("--port", type=int, default=7899)
+    parser.add_argument("--no-open", action="store_true", help="Don't auto-open browser")
+    args = parser.parse_args()
+
+    url = f"http://localhost:{args.port}"
+
+    if not args.no_open:
+        def _open():
+            time.sleep(1.2)
+            webbrowser.open(url)
+        threading.Thread(target=_open, daemon=True).start()
+
+    print(f"claude-web  →  {url}  (Ctrl+C to stop)")
+    uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="warning")
+
+
+if __name__ == "__main__":
+    main()

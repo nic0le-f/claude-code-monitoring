@@ -1,0 +1,1068 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Claude Monitor</title>
+<style>
+:root {
+  --bg:         #0d1117;
+  --panel-bg:   #161b22;
+  --border:     #30363d;
+  --text:       #e6edf3;
+  --dim:        #6e7681;
+  --cyan:       #39d0d8;
+  --green:      #3fb950;
+  --red:        #f85149;
+  --amber:      #e3b341;
+  --purple:     #bc8cff;
+  --blue:       #58a6ff;
+  --magenta:    #ff7eb6;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  font-size: 13px;
+  line-height: 1.5;
+  min-height: 100vh;
+}
+
+/* ── Header ── */
+header {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.6rem 1.2rem;
+  background: var(--panel-bg);
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+header h1 {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--cyan);
+  letter-spacing: 0.05em;
+}
+#status-dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--dim);
+  flex-shrink: 0;
+}
+#status-dot.live { background: var(--green); }
+#status-dot.error { background: var(--red); }
+#last-update { color: var(--dim); font-size: 11px; margin-left: auto; }
+#health-bar {
+  color: var(--dim);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 500px;
+}
+
+/* ── Layout grid ── */
+main {
+  display: grid;
+  grid-template-columns: 2fr 1fr;
+  grid-template-rows: auto auto auto;
+  gap: 0.8rem;
+  padding: 0.8rem;
+}
+
+.panel {
+  background: var(--panel-bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.4rem 0.8rem;
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.panel-body { padding: 0; }
+
+/* Sessions panel */
+#sessions-panel { grid-column: 1; grid-row: 1; }
+/* Issues panel spans rows 1-2 */
+#issues-panel   { grid-column: 2; grid-row: 1 / 3; }
+/* Agent tree */
+#agents-panel   { grid-column: 1; grid-row: 2; }
+/* Tool usage full width */
+#tools-panel    { grid-column: 1 / 3; grid-row: 3; }
+/* Worktrees full width */
+#worktrees-panel { grid-column: 1 / 3; grid-row: 4; }
+/* History full width, at the bottom */
+#history-panel   { grid-column: 1 / 3; grid-row: 5; }
+
+#history-body {
+  display: grid;
+  grid-template-columns: 2fr 1fr 1fr;
+  gap: 0.8rem;
+  padding: 0.6rem 0.8rem;
+}
+#history-chart { min-height: 90px; }
+#history-chart svg { width: 100%; height: 100px; display: block; }
+#history-chart .axis-label { fill: var(--dim); font-size: 10px; }
+#history-chart .bar { fill: var(--cyan); opacity: 0.55; }
+#history-chart .bar:hover { opacity: 0.9; }
+#history-chart .fire-dot { stroke: var(--bg); stroke-width: 1; }
+#history-chart .fire-alarm { fill: var(--red); }
+#history-chart .fire-warn  { fill: var(--amber); }
+.hist-stat-row {
+  display: flex; justify-content: space-between;
+  padding: 0.2rem 0; font-size: 12px;
+}
+.hist-stat-row .k { color: var(--dim); }
+.hist-stat-row .v { color: var(--text); font-weight: 600; }
+.hist-heading {
+  color: var(--dim); font-size: 10px; text-transform: uppercase;
+  letter-spacing: 0.08em; margin: 0 0 0.3rem 0;
+}
+.hist-project {
+  display: flex; justify-content: space-between;
+  font-size: 12px; padding: 0.15rem 0; gap: 0.5rem;
+}
+.hist-project .p-cwd {
+  color: var(--text); overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap;
+}
+.hist-project .p-cost { color: var(--green); font-variant-numeric: tabular-nums; }
+.hist-legend {
+  color: var(--dim); font-size: 10px;
+  margin-top: 0.2rem; display: flex; gap: 0.8rem;
+}
+.hist-legend .dot { display: inline-block; width: 8px; height: 8px;
+  border-radius: 50%; margin-right: 0.25rem; vertical-align: middle; }
+
+/* ── Tables ── */
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+th {
+  padding: 0.3rem 0.7rem;
+  text-align: left;
+  color: var(--dim);
+  font-weight: 600;
+  font-size: 11px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+td {
+  padding: 0.3rem 0.7rem;
+  border-bottom: 1px solid rgba(48,54,61,0.5);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 300px;
+}
+tr:last-child td { border-bottom: none; }
+tr.clickable { cursor: pointer; }
+tr.clickable:hover td { background: rgba(255,255,255,0.03); }
+
+/* ── Badges ── */
+.badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+.badge-cli      { background: #0d3d3f; color: var(--cyan); }
+.badge-vscode   { background: #003050; color: var(--blue); }
+.badge-jetbrains{ background: #003050; color: var(--blue); }
+.badge-remote   { background: #2d1f45; color: var(--purple); }
+.badge-ide      { background: #003050; color: var(--blue); }
+.badge-resumed  { background: #3d2c00; color: var(--amber); }
+.badge-agent    { background: #3d1030; color: var(--magenta); }
+.badge-up       { background: #0d2e15; color: var(--green); }
+.badge-dead     { background: #2e0d0d; color: var(--red); }
+.badge-warn     { background: #2e1a00; color: var(--amber); }
+.badge-info     { background: #0d2035; color: var(--blue); }
+.badge-ok       { background: #0d2e15; color: var(--green); }
+
+/* ── Severity colors ── */
+.sev-warn { color: var(--red); font-weight: 600; }
+.sev-info { color: var(--dim); }
+.tok-high { color: var(--red); font-weight: 600; }
+.tok-med  { color: var(--amber); }
+.dim      { color: var(--dim); }
+.green    { color: var(--green); }
+.red      { color: var(--red); }
+.cyan     { color: var(--cyan); }
+.amber    { color: var(--amber); }
+.blue     { color: var(--blue); }
+.magenta  { color: var(--magenta); }
+.purple   { color: var(--purple); }
+
+/* ── Expandable rows ── */
+.expand-row td {
+  background: #0d1117;
+  padding: 0.6rem 1rem;
+  white-space: pre-wrap;
+  max-width: none;
+  font-size: 11px;
+}
+.expand-body {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 1rem;
+}
+.expand-section h4 {
+  color: var(--dim);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-bottom: 0.4rem;
+}
+.activity-line {
+  display: flex;
+  gap: 0.6rem;
+  margin-bottom: 0.15rem;
+}
+.activity-ts { color: var(--dim); min-width: 65px; }
+.activity-tool { min-width: 80px; }
+.activity-target { color: var(--dim); overflow: hidden; text-overflow: ellipsis; }
+
+.tool-bar-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.2rem;
+}
+.tool-bar-label { min-width: 70px; }
+.tool-bar-track {
+  flex: 1;
+  height: 8px;
+  background: var(--border);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.tool-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+}
+.tool-bar-count { color: var(--dim); font-size: 11px; min-width: 30px; text-align: right; }
+
+.file-list { list-style: none; }
+.file-list li { color: var(--dim); margin-bottom: 0.15rem; }
+.file-list li span { color: var(--text); }
+
+/* ── Agent tree ── */
+.tree-root { padding: 0.4rem 0; }
+.tree-session {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.25rem 0.8rem;
+  font-weight: 600;
+  color: var(--cyan);
+}
+.tree-connector { color: var(--border); font-family: monospace; margin-left: 1.2rem; }
+.tree-child {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.15rem 0.8rem;
+  padding-left: 2rem;
+}
+.tree-child .dim { font-size: 11px; }
+.tree-orphan { color: var(--dim); padding: 0.15rem 0.8rem 0.15rem 2rem; }
+
+/* ── Issues panel ── */
+.issue-row {
+  padding: 0.4rem 0.8rem;
+  border-bottom: 1px solid rgba(48,54,61,0.4);
+  cursor: pointer;
+}
+.issue-row:last-child { border-bottom: none; }
+.issue-row:hover { background: rgba(255,255,255,0.02); }
+.issue-header { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+.issue-type { font-weight: 600; font-size: 12px; }
+.issue-detail { color: var(--dim); font-size: 11px; margin-top: 0.15rem; }
+.issue-pid { color: var(--dim); font-size: 10px; }
+.issue-evidence {
+  display: none;
+  margin-top: 0.4rem;
+  padding: 0.4rem;
+  background: var(--bg);
+  border-radius: 4px;
+  font-size: 11px;
+  color: var(--dim);
+  white-space: pre;
+}
+.issue-evidence.open { display: block; }
+.issue-suggestion {
+  margin-top: 0.3rem;
+  font-size: 11px;
+  color: var(--green);
+}
+.no-issues {
+  padding: 1rem 0.8rem;
+  color: var(--green);
+  text-align: center;
+  font-size: 12px;
+}
+
+/* ── Tool usage two-col ── */
+.tools-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0;
+}
+.tools-col {
+  padding: 0.4rem;
+}
+.tools-col:first-child {
+  border-right: 1px solid var(--border);
+}
+.tools-col-header {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--dim);
+  padding: 0 0.4rem 0.4rem;
+  font-weight: 600;
+}
+.tools-session-block {
+  margin-bottom: 0.8rem;
+}
+.tools-session-label {
+  font-size: 11px;
+  color: var(--dim);
+  margin-bottom: 0.3rem;
+  padding: 0 0.4rem;
+}
+
+/* ── Worktrees ── */
+#worktrees-panel { min-height: 0; }
+
+/* ── Empty states ── */
+.empty { padding: 1rem 0.8rem; color: var(--dim); text-align: center; font-size: 12px; }
+
+/* ── Scrolling ── */
+#issues-panel { overflow-y: auto; max-height: 600px; }
+.panel-body { overflow-x: auto; }
+</style>
+</head>
+<body>
+
+<header>
+  <div id="status-dot"></div>
+  <h1>claude monitor</h1>
+  <div id="health-bar"></div>
+  <div id="last-update">connecting…</div>
+</header>
+
+<main>
+  <div class="panel" id="sessions-panel">
+    <div class="panel-header">
+      <span class="cyan">Sessions</span>
+      <span id="sessions-subtitle" class="dim"></span>
+    </div>
+    <div class="panel-body">
+      <table id="sessions-table">
+        <thead><tr>
+          <th>PID</th><th>Status</th><th>Kind</th><th>Up</th>
+          <th style="width:30%">Title</th><th>CWD</th>
+          <th style="text-align:right">Tokens</th><th style="text-align:right">TC</th>
+        </tr></thead>
+        <tbody id="sessions-body"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="panel" id="issues-panel">
+    <div class="panel-header">
+      <span id="issues-title">Issues</span>
+    </div>
+    <div id="issues-body"></div>
+  </div>
+
+  <div class="panel" id="agents-panel">
+    <div class="panel-header">
+      <span class="purple">Agent Tree</span>
+    </div>
+    <div class="panel-body" id="agents-body"></div>
+  </div>
+
+  <div class="panel" id="tools-panel">
+    <div class="panel-header">
+      <span class="amber">Tool Usage</span>
+    </div>
+    <div class="panel-body">
+      <div class="tools-grid">
+        <div class="tools-col">
+          <div class="tools-col-header">By Session</div>
+          <div id="tools-breakdown"></div>
+        </div>
+        <div class="tools-col">
+          <div class="tools-col-header">Recent Activity</div>
+          <div id="tools-recent" style="padding:0.4rem"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel" id="worktrees-panel">
+    <div class="panel-header">
+      <span class="blue">Worktrees</span>
+    </div>
+    <div class="panel-body">
+      <table id="worktrees-table">
+        <thead><tr>
+          <th>Worktree</th><th>Branch</th><th style="text-align:right">Changes</th><th>Last Active</th>
+        </tr></thead>
+        <tbody id="worktrees-body"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="panel" id="history-panel">
+    <div class="panel-header">
+      <span class="cyan">History</span>
+      <span id="history-subtitle" class="dim"></span>
+    </div>
+    <div id="history-body">
+      <div>
+        <div class="hist-heading">Daily cost · last 14 days</div>
+        <div id="history-chart"></div>
+        <div class="hist-legend">
+          <span><span class="dot" style="background:var(--cyan);opacity:0.55"></span>daily $</span>
+          <span><span class="dot" style="background:var(--amber)"></span>warn fire</span>
+          <span><span class="dot" style="background:var(--red)"></span>alarm fire</span>
+        </div>
+      </div>
+      <div>
+        <div class="hist-heading">Totals &amp; fires</div>
+        <div id="history-stats"></div>
+      </div>
+      <div>
+        <div class="hist-heading">Top projects by spend</div>
+        <div id="history-projects"></div>
+      </div>
+    </div>
+  </div>
+</main>
+
+<script>
+'use strict';
+
+// ── Helpers ────────────────────────────────────────────────────
+
+function esc(s) {
+  return String(s ?? '')
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;');
+}
+
+function kindBadge(kind) {
+  const k = (kind || 'cli').toLowerCase();
+  const label = k === 'vscode' ? 'VS Code'
+    : k === 'jetbrains' ? 'JetBrains'
+    : k === 'remote' ? 'Remote'
+    : k === 'ide' ? 'IDE'
+    : k === 'resumed' ? 'Resumed'
+    : 'CLI';
+  return `<span class="badge badge-${esc(k)}">${label}</span>`;
+}
+
+function tokClass(k) {
+  return k > 500 ? 'tok-high' : k > 200 ? 'tok-med' : '';
+}
+
+// Tool → CSS class for colour
+const TOOL_COLORS = {
+  Read: 'cyan', Glob: 'cyan', Grep: 'cyan',
+  Edit: 'green', Write: 'green',
+  Bash: 'red',
+  Agent: 'magenta',
+};
+function toolColor(name) { return TOOL_COLORS[name] || 'amber'; }
+
+// Bar fill colours by tool
+const TOOL_BAR_COLORS = {
+  Read: '#39d0d8', Glob: '#39d0d8', Grep: '#39d0d8',
+  Edit: '#3fb950', Write: '#3fb950',
+  Bash: '#f85149',
+  Agent: '#ff7eb6',
+};
+
+const SUGGESTIONS = {
+  'possible-loop': 'Check if an Edit keeps failing. Try a different approach or intervene.',
+  'high-error-rate': 'Many tool calls erroring — check permissions, file paths, or syntax.',
+  'high-tokens': 'Run /compact to compress context, or start a new session.',
+  'token-usage': 'Context growing — consider /compact soon.',
+  'no-git': 'Start a git repo or work inside an existing one.',
+  'many-agents': 'Review if subagents are completing or spawning redundantly.',
+  'dead-session': 'Session file can be cleaned up: rm ~/.claude/sessions/<pid>.json',
+  'hook-not-executable': 'Fix with: chmod +x ~/.claude/hooks/<name>.sh',
+  'dirty-worktree': 'Commit or stash changes, or remove the worktree if done.',
+  'tool-error': 'Check error — may indicate config, permission, or path issue.',
+  'opus-overkill': 'Switch to Sonnet for mechanical work: /model sonnet',
+  'stale-cleanup': 'Run cleanup to remove dead session files.',
+};
+
+// ── State ──────────────────────────────────────────────────────
+
+let _data = null;
+const _expandedSessions = new Set();  // session_ids with detail open
+const _expandedIssues = new Set();    // issue keys with evidence open
+
+// ── Renderers ─────────────────────────────────────────────────
+
+function renderSessions(sessions) {
+  const body = document.getElementById('sessions-body');
+  if (!sessions || !sessions.length) {
+    body.innerHTML = '<tr><td colspan="8" class="empty">No active sessions</td></tr>';
+    return;
+  }
+
+  // Group: git sessions first, then no-git
+  const git = sessions.filter(s => s.has_git);
+  const nogit = sessions.filter(s => !s.has_git);
+  const ordered = [...git, ...nogit];
+
+  let html = '';
+  let prevWasGit = git.length > 0;
+
+  for (const s of ordered) {
+    if (prevWasGit && !s.has_git && git.length) {
+      html += `<tr class="dim"><td colspan="8" style="padding:0.2rem 0.7rem;font-style:italic;font-size:11px;">── no git ──</td></tr>`;
+      prevWasGit = false;
+    }
+
+    const pid = s.pid ?? '?';
+    const sid = s.session_id || '';
+    const tokK = s.tokens_k || 0;
+    const tokStr = tokK ? tokK + 'k' : '—';
+    const tcStr = s.tool_calls ? s.tool_calls : '—';
+    const title = s.title || '—';
+    // Shorten CWD: show last 2 segments
+    let cwd = s.cwd || '?';
+    const cwdParts = cwd.split('/');
+    if (cwdParts.length > 3) cwd = cwdParts.slice(-2).join('/');
+
+    const hasDetail = sid && _data && _data.tools && _data.tools[sid];
+    const isExpanded = _expandedSessions.has(sid);
+
+    html += `<tr class="${hasDetail ? 'clickable' : ''}" onclick="${hasDetail ? `toggleSession('${esc(sid)}')` : ''}">
+      <td class="dim">${esc(pid)}</td>
+      <td><span class="badge ${s.alive ? 'badge-up' : 'badge-dead'}">${s.alive ? 'UP' : 'DEAD'}</span></td>
+      <td>${kindBadge(s.kind)}</td>
+      <td class="dim">${esc(s.runtime)}</td>
+      <td style="max-width:260px" title="${esc(s.title)}">${esc(title)}</td>
+      <td class="dim" style="max-width:180px" title="${esc(s.cwd)}">${esc(cwd)}</td>
+      <td style="text-align:right" class="${tokClass(tokK)}">${esc(tokStr)}</td>
+      <td style="text-align:right" class="dim">${esc(tcStr)}</td>
+    </tr>`;
+
+    if (isExpanded && hasDetail) {
+      html += buildSessionDetail(sid, s);
+    }
+  }
+
+  body.innerHTML = html;
+
+  const stale = (_data?.issues || []).filter(i => i.type === 'dead-session').length;
+  const subtitle = document.getElementById('sessions-subtitle');
+  subtitle.textContent = stale ? `${stale} stale` : '';
+}
+
+function buildSessionDetail(sid, sess) {
+  const t = (_data.tools || {})[sid] || {};
+  const breakdown = t.breakdown || {};
+  const recent = t.recent || [];
+  const created = t.created_files || [];
+
+  const total = Object.values(breakdown).reduce((a,b) => a+b, 0) || 1;
+  const sorted = Object.entries(breakdown).sort((a,b) => b[1]-a[1]);
+
+  let barsHtml = '';
+  for (const [tool, count] of sorted.slice(0, 8)) {
+    const pct = Math.round(count / total * 100);
+    const color = TOOL_BAR_COLORS[tool] || '#e3b341';
+    barsHtml += `
+      <div class="tool-bar-row">
+        <span class="tool-bar-label ${toolColor(tool)}">${esc(tool)}</span>
+        <div class="tool-bar-track"><div class="tool-bar-fill" style="width:${pct}%;background:${color}"></div></div>
+        <span class="tool-bar-count">${count}</span>
+      </div>`;
+  }
+  if (!barsHtml) barsHtml = '<span class="dim">No tool data yet</span>';
+
+  let actHtml = '';
+  for (const e of recent.slice().reverse()) {
+    actHtml += `<div class="activity-line">
+      <span class="activity-ts dim">${esc(e.ts_ago || '')}</span>
+      <span class="activity-tool ${toolColor(e.tool)}">${esc(e.tool)}</span>
+      <span class="activity-target">${esc(e.target || '')}</span>
+    </div>`;
+  }
+  if (!actHtml) actHtml = '<span class="dim">No recent activity</span>';
+
+  let filesHtml = '<ul class="file-list">';
+  if (created.length) {
+    for (const f of created.slice(-10)) {
+      const base = f.split('/').pop();
+      const dir = f.split('/').slice(0,-1).join('/');
+      filesHtml += `<li><span class="dim">${esc(dir)}/</span><span>${esc(base)}</span></li>`;
+    }
+  } else {
+    filesHtml += '<li class="dim">No files created</li>';
+  }
+  filesHtml += '</ul>';
+
+  const errCount = t.error_count || 0;
+
+  return `<tr class="expand-row">
+    <td colspan="8">
+      <div class="expand-body">
+        <div class="expand-section">
+          <h4>Tool Breakdown ${errCount ? `<span class="red">(${errCount} errors)</span>` : ''}</h4>
+          ${barsHtml}
+        </div>
+        <div class="expand-section">
+          <h4>Recent Activity</h4>
+          ${actHtml}
+        </div>
+        <div class="expand-section">
+          <h4>Files Created (Write)</h4>
+          ${filesHtml}
+        </div>
+      </div>
+    </td>
+  </tr>`;
+}
+
+function toggleSession(sid) {
+  if (_expandedSessions.has(sid)) {
+    _expandedSessions.delete(sid);
+  } else {
+    _expandedSessions.add(sid);
+  }
+  if (_data) renderSessions(_data.sessions);
+}
+
+// ── Issues ────────────────────────────────────────────────────
+
+function renderIssues(issues) {
+  const body = document.getElementById('issues-body');
+  const titleEl = document.getElementById('issues-title');
+
+  if (!issues || !issues.length) {
+    body.innerHTML = '<div class="no-issues">✓ No issues detected</div>';
+    titleEl.innerHTML = '<span class="green">Issues — all clear</span>';
+    return;
+  }
+
+  const warns = issues.filter(i => i.severity === 'warn').length;
+  const color = warns ? 'red' : 'amber';
+  titleEl.innerHTML = `<span class="${color}">Issues — ${warns} warn, ${issues.length} total</span>`;
+
+  let html = '';
+  for (let idx = 0; idx < issues.length; idx++) {
+    const i = issues[idx];
+    const key = `${i.type}:${i.session}:${idx}`;
+    const isOpen = _expandedIssues.has(key);
+    const sev = i.severity === 'warn' ? 'warn' : 'info';
+    const sevClass = sev === 'warn' ? 'sev-warn' : 'sev-info';
+
+    const evidence = (i.evidence || []).join('\n');
+    const suggestion = SUGGESTIONS[i.type] || '';
+    const hasMore = evidence || suggestion;
+
+    html += `<div class="issue-row" onclick="${hasMore ? `toggleIssue('${esc(key)}')` : ''}">
+      <div class="issue-header">
+        <span class="badge badge-${sev}">${sev.toUpperCase()}</span>
+        <span class="issue-type ${sevClass}">${esc(i.type)}</span>
+        <span class="issue-pid dim">PID ${esc(i.session)}</span>
+      </div>
+      <div class="issue-detail">${esc(i.detail)}</div>
+      ${hasMore ? `
+        <div class="issue-evidence ${isOpen ? 'open' : ''}" id="iev-${esc(key)}">${evidence ? esc(evidence) : ''}${suggestion ? `\n→ ${esc(suggestion)}` : ''}</div>` : ''}
+    </div>`;
+  }
+
+  body.innerHTML = html;
+}
+
+function toggleIssue(key) {
+  const el = document.getElementById('iev-' + key);
+  if (!el) return;
+  if (_expandedIssues.has(key)) {
+    _expandedIssues.delete(key);
+    el.classList.remove('open');
+  } else {
+    _expandedIssues.add(key);
+    el.classList.add('open');
+  }
+}
+
+// ── Agent tree ────────────────────────────────────────────────
+
+function renderAgents(events, sessions) {
+  const body = document.getElementById('agents-body');
+
+  if (!events || !events.length) {
+    body.innerHTML = '<div class="empty">No agent activity tracked yet</div>';
+    return;
+  }
+
+  // Group events by parent session prefix
+  const bySession = {};
+  for (const ev of events) {
+    const key = ev.session || '__unknown__';
+    if (!bySession[key]) bySession[key] = [];
+    bySession[key].push(ev);
+  }
+
+  // Map session_id prefix → session info
+  const sessionMap = {};
+  for (const s of (sessions || [])) {
+    const prefix = (s.session_id || '').slice(0, 8);
+    if (prefix) sessionMap[prefix] = s;
+  }
+
+  let html = '<div class="tree-root">';
+  const renderedKeys = new Set();
+
+  // Sessions with known active parent first
+  for (const s of (sessions || [])) {
+    const prefix = (s.session_id || '').slice(0, 8);
+    if (!prefix || !bySession[prefix]) continue;
+    renderedKeys.add(prefix);
+
+    const cwd = s.cwd || '';
+    html += `<div class="tree-session">
+      <span class="badge badge-${esc((s.kind||'cli').toLowerCase())}">${esc(s.pid)}</span>
+      <span class="cyan">${esc(prefix)}</span>
+      <span class="dim">${esc(cwd)}</span>
+    </div>`;
+
+    const children = bySession[prefix];
+    for (let i = 0; i < children.length; i++) {
+      const ev = children[i];
+      const isLast = i === children.length - 1;
+      const connector = isLast ? '└─' : '├─';
+      const respLen = ev.response_len ? `${(ev.response_len/1000).toFixed(1)}k chars` : '';
+      html += `<div class="tree-child">
+        <span class="tree-connector dim">${connector}</span>
+        <span class="badge badge-agent">${esc(ev.agent_type || '?')}</span>
+        <span class="dim">${esc(ev.description || '')}</span>
+        <span class="dim" style="margin-left:auto;font-size:10px">${esc(ev.ts_ago || '')}${respLen ? ' · '+respLen : ''}</span>
+      </div>`;
+    }
+  }
+
+  // Orphaned events (parent session no longer active)
+  for (const [key, evs] of Object.entries(bySession)) {
+    if (renderedKeys.has(key) || key === '__unknown__') continue;
+    html += `<div class="tree-session dim">
+      <span class="dim">${esc(key)}</span>
+      <span class="dim" style="font-size:11px;font-style:italic">(session ended)</span>
+    </div>`;
+    for (let i = 0; i < evs.length; i++) {
+      const ev = evs[i];
+      const isLast = i === evs.length - 1;
+      html += `<div class="tree-child dim">
+        <span class="tree-connector dim">${isLast ? '└─' : '├─'}</span>
+        <span class="dim">${esc(ev.agent_type || '?')}</span>
+        <span class="dim">${esc(ev.description || '')}</span>
+        <span class="dim" style="margin-left:auto;font-size:10px">${esc(ev.ts_ago || '')}</span>
+      </div>`;
+    }
+  }
+
+  html += '</div>';
+  body.innerHTML = html;
+}
+
+// ── Tool usage ────────────────────────────────────────────────
+
+function renderTools(tools, sessions) {
+  const breakdownEl = document.getElementById('tools-breakdown');
+  const recentEl = document.getElementById('tools-recent');
+
+  const aliveSessions = (sessions || []).filter(s => s.alive && s.session_id && tools[s.session_id]);
+
+  // Breakdown column
+  if (!aliveSessions.length) {
+    breakdownEl.innerHTML = '<div class="empty" style="text-align:left;padding:0.5rem">No active sessions with tool data</div>';
+  } else {
+    let html = '';
+    for (const s of aliveSessions) {
+      const t = tools[s.session_id] || {};
+      const breakdown = t.breakdown || {};
+      const errCount = t.error_count || 0;
+      const total = Object.values(breakdown).reduce((a,b) => a+b, 0) || 1;
+      const sorted = Object.entries(breakdown).sort((a,b) => b[1]-a[1]);
+
+      const cwd = (s.cwd || '').split('/').slice(-1)[0] || s.cwd || '?';
+      html += `<div class="tools-session-block">
+        <div class="tools-session-label dim">PID ${esc(s.pid)} · ${esc(cwd)}${errCount ? ` <span class="red">(${errCount} err)</span>` : ''}</div>`;
+
+      for (const [tool, count] of sorted.slice(0, 7)) {
+        const pct = Math.round(count / total * 100);
+        const color = TOOL_BAR_COLORS[tool] || '#e3b341';
+        html += `<div class="tool-bar-row" style="padding:0 0.4rem">
+          <span class="tool-bar-label ${toolColor(tool)}" style="font-size:11px">${esc(tool)}</span>
+          <div class="tool-bar-track"><div class="tool-bar-fill" style="width:${pct}%;background:${color}"></div></div>
+          <span class="tool-bar-count">${count}</span>
+        </div>`;
+      }
+
+      // Created files inline (compact)
+      const created = t.created_files || [];
+      if (created.length) {
+        const shown = created.slice(-4);
+        html += `<div style="padding:0.3rem 0.4rem 0 0.4rem;font-size:10px;color:var(--dim)">
+          Created: ${shown.map(f => `<span style="color:var(--text)">${esc(f.split('/').pop())}</span>`).join(', ')}
+          ${created.length > 4 ? `<span>+${created.length-4} more</span>` : ''}
+        </div>`;
+      }
+
+      html += '</div>';
+    }
+    breakdownEl.innerHTML = html;
+  }
+
+  // Recent activity column — merge all sessions, sort by ts desc
+  let allRecent = [];
+  for (const s of aliveSessions) {
+    const t = tools[s.session_id] || {};
+    for (const e of t.recent || []) {
+      allRecent.push({ ...e, pid: s.pid });
+    }
+  }
+  allRecent.sort((a,b) => (b.ts||'').localeCompare(a.ts||''));
+
+  if (!allRecent.length) {
+    recentEl.innerHTML = '<div class="empty" style="text-align:left">No recent activity</div>';
+  } else {
+    let html = '';
+    for (const e of allRecent.slice(0, 12)) {
+      html += `<div class="activity-line">
+        <span class="activity-ts dim">${esc(e.ts_ago || '')}</span>
+        <span class="activity-tool ${toolColor(e.tool)}">${esc(e.tool)}</span>
+        <span class="activity-target">${esc(e.target || '')}</span>
+      </div>`;
+    }
+    recentEl.innerHTML = html;
+  }
+}
+
+// ── Worktrees ─────────────────────────────────────────────────
+
+function renderWorktrees(worktrees) {
+  const body = document.getElementById('worktrees-body');
+  if (!worktrees || !worktrees.length) {
+    body.innerHTML = '<tr><td colspan="4" class="empty">No active worktrees</td></tr>';
+    return;
+  }
+  let html = '';
+  for (const wt of worktrees) {
+    const dirty = wt.dirty ?? 0;
+    const dirtyStr = dirty > 0 ? `${dirty} changes` : 'clean';
+    const dirtyClass = dirty > 0 ? 'amber' : 'green';
+    html += `<tr>
+      <td>${esc(wt.name)}</td>
+      <td class="dim">${esc(wt.branch || '?')}</td>
+      <td style="text-align:right" class="${dirtyClass}">${esc(dirtyStr)}</td>
+      <td class="dim">${esc(wt.last_active || '?')}</td>
+    </tr>`;
+  }
+  body.innerHTML = html;
+}
+
+// ── History ───────────────────────────────────────────────────
+
+function renderHistory(h) {
+  if (!h) return;
+  const days = h.days || [];
+  const fires = h.fires_by_day || [];
+
+  // Subtitle
+  const t = h.totals || {};
+  document.getElementById('history-subtitle').textContent =
+    `${h.window_days || 14} days · $${(t.cost_usd ?? 0).toFixed(2)} · ${t.sessions ?? 0} sessions`;
+
+  // Sparkline
+  const chartEl = document.getElementById('history-chart');
+  const W = chartEl.clientWidth || 600;
+  const H = 100;
+  const PAD_L = 26, PAD_R = 6, PAD_T = 6, PAD_B = 16;
+  const innerW = W - PAD_L - PAD_R;
+  const innerH = H - PAD_T - PAD_B;
+  const n = days.length || 1;
+  const max = Math.max(1, ...days.map(d => d.cost_usd || 0));
+  const barW = innerW / n * 0.75;
+  const step = innerW / n;
+
+  let svg = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">`;
+
+  // Y-axis labels (max + 0)
+  svg += `<text x="2" y="${PAD_T + 8}" class="axis-label">$${Math.round(max)}</text>`;
+  svg += `<text x="2" y="${PAD_T + innerH}" class="axis-label">$0</text>`;
+
+  // Bars
+  for (let i = 0; i < n; i++) {
+    const d = days[i];
+    const cost = d.cost_usd || 0;
+    const h = cost > 0 ? Math.max(1, (cost / max) * innerH) : 0;
+    const x = PAD_L + i * step + (step - barW) / 2;
+    const y = PAD_T + innerH - h;
+    const title = `${d.date}: $${cost.toFixed(2)} · ${d.sessions} sessions · ${d.tool_calls} tool calls`;
+    svg += `<rect class="bar" x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barW.toFixed(1)}" height="${h.toFixed(1)}"><title>${esc(title)}</title></rect>`;
+  }
+
+  // Fire markers — stacked above bars. Alarm (red) > warn (amber).
+  for (let i = 0; i < fires.length; i++) {
+    const f = fires[i];
+    const alarmCount = (f.cost_alarm || 0) + (f.ctx_alarm || 0);
+    const warnCount = (f.cost_loud || 0) + (f.cost_soft || 0) + (f.ctx_warn || 0);
+    const cx = PAD_L + i * step + step / 2;
+    let cy = PAD_T + 4;
+    if (alarmCount > 0) {
+      svg += `<circle class="fire-dot fire-alarm" cx="${cx.toFixed(1)}" cy="${cy}" r="3.5"><title>${esc(f.date)}: ${alarmCount} alarm fire(s)</title></circle>`;
+      cy += 9;
+    }
+    if (warnCount > 0) {
+      svg += `<circle class="fire-dot fire-warn" cx="${cx.toFixed(1)}" cy="${cy}" r="3"><title>${esc(f.date)}: ${warnCount} warning fire(s)</title></circle>`;
+    }
+  }
+
+  // X-axis labels: first, middle, last day
+  if (n >= 2) {
+    const mid = Math.floor(n / 2);
+    const ys = PAD_T + innerH + 12;
+    svg += `<text x="${PAD_L}" y="${ys}" class="axis-label">${esc((days[0]?.date || '').slice(5))}</text>`;
+    svg += `<text x="${PAD_L + step * mid}" y="${ys}" class="axis-label" text-anchor="middle">${esc((days[mid]?.date || '').slice(5))}</text>`;
+    svg += `<text x="${W - PAD_R}" y="${ys}" class="axis-label" text-anchor="end">${esc((days[n-1]?.date || '').slice(5))}</text>`;
+  }
+
+  svg += '</svg>';
+  chartEl.innerHTML = svg;
+
+  // Stats column
+  const ft = h.fire_totals || {};
+  const ms = h.model_split || {};
+  const statRow = (k, v, cls) => `<div class="hist-stat-row"><span class="k">${esc(k)}</span><span class="v ${cls||''}">${v}</span></div>`;
+
+  let stats = '';
+  stats += statRow('Total cost', `$${(t.cost_usd ?? 0).toFixed(2)}`, 'green');
+  stats += statRow('Sessions', t.sessions ?? 0);
+  stats += statRow('Tool calls', t.tool_calls ?? 0);
+  const sep = '<div style="height:0.4rem"></div>';
+  stats += sep;
+
+  const fireLine = (label, cls, n) => statRow(label, n, n ? cls : 'dim');
+  stats += fireLine('Context alarm',  'red',   ft.ctx_alarm || 0);
+  stats += fireLine('Context warn',   'amber', ft.ctx_warn || 0);
+  stats += fireLine('Cost alarm',     'red',   ft.cost_alarm || 0);
+  stats += fireLine('Cost loud',      'amber', ft.cost_loud || 0);
+  stats += fireLine('Cost soft',      'dim',   ft.cost_soft || 0);
+  stats += fireLine('Loops detected', 'amber', ft['loop-detected'] || 0);
+
+  if (Object.keys(ms).length) {
+    stats += sep;
+    for (const [model, v] of Object.entries(ms)) {
+      const cls = model === 'opus' ? 'magenta' : model === 'sonnet' ? 'blue' : '';
+      stats += statRow(`${model}`, `$${v.cost_usd.toFixed(2)} · ${v.sessions}`, cls);
+    }
+  }
+  document.getElementById('history-stats').innerHTML = stats;
+
+  // Top projects
+  const projs = h.top_projects || [];
+  const pEl = document.getElementById('history-projects');
+  if (!projs.length) {
+    pEl.innerHTML = '<div class="empty" style="text-align:left;padding:0.3rem 0">No data yet</div>';
+  } else {
+    pEl.innerHTML = projs.map(p =>
+      `<div class="hist-project" title="${esc(p.cwd)} · ${p.sessions} sessions">
+        <span class="p-cwd">${esc(p.cwd)}</span>
+        <span class="p-cost">$${p.cost_usd.toFixed(2)}</span>
+      </div>`
+    ).join('');
+  }
+}
+
+// ── Health bar ────────────────────────────────────────────────
+
+function renderHealth(health) {
+  if (!health) return;
+  const parts = Object.entries(health).map(([k,v]) => `${k}: ${v}`);
+  document.getElementById('health-bar').textContent = parts.join('  ·  ');
+}
+
+// ── Main render ───────────────────────────────────────────────
+
+function render(data) {
+  _data = data;
+  renderSessions(data.sessions);
+  renderIssues(data.issues);
+  renderAgents(data.agent_events, data.sessions);
+  renderTools(data.tools, data.sessions);
+  renderWorktrees(data.worktrees);
+  renderHistory(data.history);
+  renderHealth(data.health);
+  document.getElementById('last-update').textContent =
+    'updated ' + new Date().toLocaleTimeString();
+}
+
+// ── SSE connection ────────────────────────────────────────────
+
+function connect() {
+  const dot = document.getElementById('status-dot');
+  const lastUpdate = document.getElementById('last-update');
+
+  const src = new EventSource('/events');
+
+  src.onopen = () => {
+    dot.className = 'live';
+  };
+
+  src.onmessage = (e) => {
+    try {
+      const data = JSON.parse(e.data);
+      if (data.error) {
+        console.error('Server error:', data.error);
+        return;
+      }
+      render(data);
+    } catch(err) {
+      console.error('Parse error:', err);
+    }
+  };
+
+  src.onerror = () => {
+    dot.className = 'error';
+    lastUpdate.textContent = 'connection lost — retrying…';
+    src.close();
+    // Browser auto-reconnects EventSource, but we set a timeout for UX clarity
+    setTimeout(connect, 3000);
+  };
+}
+
+connect();
+</script>
+</body>
+</html>

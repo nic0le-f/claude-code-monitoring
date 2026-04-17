@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.venv/
+
+# Hook runtime state — per-session cost/offset caches, warning flags, session log.
+state/

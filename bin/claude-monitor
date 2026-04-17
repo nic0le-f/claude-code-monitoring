@@ -1,0 +1,479 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# requires-python = ">=3.12"
+# dependencies = ["rich>=13.0"]
+# ///
+"""claude-monitor — Live TUI dashboard for Claude Code sessions and agents.
+
+Usage:
+    claude-monitor              # live TUI (default, 2s refresh)
+    claude-monitor --once       # single snapshot, then exit
+    claude-monitor --json       # machine-readable JSON output
+    claude-monitor --interval 5 # custom refresh interval (seconds)
+"""
+
+import argparse
+import datetime
+import json
+import os
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+from rich.console import Console
+from rich.layout import Layout
+from rich.live import Live
+from rich.panel import Panel
+from rich.table import Table
+from rich.text import Text
+
+# Make the monitor's own lib/ importable (bin/ is a sibling of lib/).
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from lib.api import (  # noqa: E402
+    get_active_sessions, get_session_estimates, get_session_activity,
+    get_session_tool_stats, get_subagents, get_agent_tree_events,
+    get_worktrees, get_stale_sessions, get_alerts, detect_issues, get_health,
+    iso_ago, time_ago, _preview_input,
+    CLAUDE_DIR, SESSIONS_DIR, PROJECTS_DIR, IDE_DIR,
+)
+
+console = Console()
+
+
+# ── Panel builders ──────────────────────────────────────────────
+
+
+def build_sessions_panel() -> Panel:
+    sessions = get_active_sessions()
+    estimates = get_session_estimates()
+    table = Table(expand=True, show_header=True, header_style="bold cyan", box=None, padding=(0, 1))
+    table.add_column("PID", width=7)
+    table.add_column("Status", width=6)
+    table.add_column("Kind", width=8)
+    table.add_column("Up", width=5)
+    table.add_column("Title", ratio=1, no_wrap=True)
+    table.add_column("CWD", width=22, no_wrap=True)
+    table.add_column("Tok", width=6, justify="right")
+    table.add_column("TC", width=4, justify="right")
+
+    git_sessions = [s for s in sessions if s.get("has_git")]
+    nogit_sessions = [s for s in sessions if not s.get("has_git")]
+
+    kind_styles = {
+        "cli": "cyan", "interactive": "cyan", "ide": "blue",
+        "remote": "magenta", "resumed": "yellow",
+        "vscode": "blue", "jetbrains": "blue",
+    }
+
+    def _add_session_rows(session_list):
+        for s in session_list:
+            alive = s.get("alive", False)
+            status = Text("UP", style="bold green") if alive else Text("DEAD", style="dim red")
+
+            kind = s.get("kind", s.get("entrypoint", "?"))
+            kind_style = kind_styles.get(kind, "dim")
+            kind_text = Text(kind[:8], style=kind_style)
+
+            cwd = s.get("cwd", "?")
+            cwd = cwd.replace(str(Path.home()), "~")
+            parts = cwd.split("/")
+            if len(parts) > 3:
+                cwd = "/".join(parts[-2:])
+
+            title = s.get("title", "")
+            if not title:
+                title = Text("—", style="dim")
+
+            sid = s.get("sessionId", "")
+            est = estimates.get(sid, {})
+            tokens_k = est.get("est_tokens_k", 0)
+            token_str = f"{tokens_k}k" if tokens_k else "—"
+            token_style = "bold red" if tokens_k > 500 else "yellow" if tokens_k > 200 else ""
+            tools = est.get("tool_calls", 0)
+            tool_str = str(tools) if tools else "—"
+
+            table.add_row(
+                str(s.get("pid", "?")),
+                status,
+                kind_text,
+                s.get("runtime", "?"),
+                title,
+                cwd,
+                Text(token_str, style=token_style),
+                tool_str,
+            )
+
+    _add_session_rows(git_sessions)
+
+    if nogit_sessions:
+        table.add_row("", "", "", "", Text("── no git ──", style="dim italic"), "", "", "")
+        _add_session_rows(nogit_sessions)
+
+    if not sessions:
+        table.add_row("—", Text("—", style="dim"), "—", "—", "No active sessions", "—", "—", "—")
+
+    stale = get_stale_sessions()
+    parts = []
+    if stale:
+        parts.append(f"[dim red]{len(stale)} stale[/dim red]")
+    if nogit_sessions:
+        parts.append(f"[dim yellow]{len(nogit_sessions)} no-git[/dim yellow]")
+    subtitle = " | ".join(parts)
+
+    return Panel(table, title="[bold]Sessions[/bold]", subtitle=subtitle, border_style="cyan", padding=(0, 1))
+
+
+def build_agents_panel() -> Panel:
+    agents = get_subagents()
+    tree_events = get_agent_tree_events()
+
+    table = Table(expand=True, show_header=True, header_style="bold magenta", box=None, padding=(0, 1))
+    table.add_column("Type", width=18)
+    table.add_column("Description", ratio=1)
+    table.add_column("Session", width=10)
+    table.add_column("Log", width=8)
+
+    shown_types = set()
+    for ev in tree_events[:8]:
+        atype = ev.get("agent_type", "?")
+        desc = ev.get("description", "")
+        ts = iso_ago(ev.get("ts", ""))
+        resp_len = ev.get("response_len", 0)
+        table.add_row(
+            Text(atype, style="magenta"),
+            f"{desc} ({ts})",
+            ev.get("session", "?")[:8],
+            f"{resp_len}ch",
+        )
+        shown_types.add(atype)
+
+    for a in agents:
+        atype = a.get("agentType", "?")
+        if atype in shown_types:
+            continue
+        desc = a.get("description", "")
+        log_info = a.get("last_modified", "—") if a.get("has_log") else "no log"
+        table.add_row(
+            Text(atype, style="dim magenta"),
+            desc,
+            a.get("session", "?"),
+            log_info,
+        )
+
+    if not agents and not tree_events:
+        table.add_row("—", "No agents tracked yet", "—", "—")
+
+    return Panel(table, title="[bold]Agent Tree[/bold]", border_style="magenta", padding=(0, 1))
+
+
+def build_tool_usage_panel() -> Panel:
+    """Two-part panel: per-session tool breakdown (left) + recent activity stream (right)."""
+    from rich.text import Text as RText
+
+    sessions = get_active_sessions()
+
+    # ── Left side: tool breakdown per session ──
+    breakdown_table = Table(show_header=True, header_style="bold yellow", box=None, padding=(0, 1), expand=True)
+    breakdown_table.add_column("PID", width=7)
+    breakdown_table.add_column("Tool Breakdown", ratio=1)
+    breakdown_table.add_column("Errs", width=5, justify="right")
+
+    for s in sessions:
+        if not s.get("alive"):
+            continue
+        sid = s.get("sessionId", "")
+        stats = get_session_tool_stats(sid)
+        counts = stats.get("tool_counts", {})
+        if not counts:
+            continue
+
+        sorted_tools = sorted(counts.items(), key=lambda x: x[1], reverse=True)
+        parts = []
+        tool_styles = {
+            "Read": "cyan", "Glob": "cyan", "Grep": "cyan",
+            "Edit": "green", "Write": "green",
+            "Bash": "red",
+            "Agent": "magenta",
+        }
+        for tool, count in sorted_tools[:6]:
+            style = tool_styles.get(tool, "yellow")
+            parts.append(f"[{style}]{tool}[/{style}]:{count}")
+        breakdown_str = "  ".join(parts)
+
+        err_count = stats.get("error_count", 0)
+        err_style = "bold red" if err_count > 3 else "dim" if err_count == 0 else "yellow"
+
+        breakdown_table.add_row(
+            str(s.get("pid", "?")),
+            RText.from_markup(breakdown_str),
+            Text(str(err_count), style=err_style),
+        )
+
+    # ── Right side: recent activity stream ──
+    activity_table = Table(show_header=True, header_style="bold yellow", box=None, padding=(0, 1), expand=True)
+    activity_table.add_column("Time", width=8)
+    activity_table.add_column("Tool", width=10)
+    activity_table.add_column("Target", ratio=1, no_wrap=True)
+
+    all_entries = []
+    for s in sessions:
+        if s.get("alive"):
+            entries = get_session_activity(s.get("sessionId", ""), max_entries=6)
+            all_entries.extend(entries)
+    all_entries.sort(key=lambda e: e.get("ts", ""), reverse=True)
+
+    tool_styles = {"Agent": "magenta", "Edit": "green", "Write": "green", "Bash": "red"}
+    for entry in all_entries[:8]:
+        tool = entry.get("tool", "?")
+        style = tool_styles.get(tool, "yellow")
+        activity_table.add_row(
+            iso_ago(entry.get("ts", "")),
+            Text(tool, style=style),
+            entry.get("input_preview", ""),
+        )
+
+    if not all_entries:
+        activity_table.add_row("—", "—", "No recent activity")
+
+    layout = Layout()
+    layout.split_row(
+        Layout(Panel(breakdown_table, title="[bold]By Session[/bold]", border_style="yellow", padding=(0, 0)), ratio=1),
+        Layout(Panel(activity_table, title="[bold]Recent[/bold]", border_style="yellow", padding=(0, 0)), ratio=1),
+    )
+    return Panel(layout, title="[bold]Tool Usage[/bold]", border_style="yellow", padding=(0, 0))
+
+
+def build_worktree_panel() -> Panel:
+    worktrees = get_worktrees()
+    table = Table(expand=True, show_header=True, header_style="bold blue", box=None, padding=(0, 1))
+    table.add_column("Worktree", ratio=1)
+    table.add_column("Branch", width=30)
+    table.add_column("Changes", width=8, justify="right")
+    table.add_column("Active", width=10)
+
+    for wt in worktrees:
+        name = wt["name"]
+        dirty = wt.get("dirty", 0)
+        dirty_str = str(dirty) if dirty > 0 else "clean"
+        dirty_style = "bold yellow" if dirty > 0 else "green"
+        table.add_row(
+            name,
+            wt.get("branch", "?"),
+            Text(dirty_str, style=dirty_style),
+            wt.get("last_active", "?"),
+        )
+
+    if not worktrees:
+        table.add_row("—", "No active worktrees", "—", "—")
+
+    return Panel(table, title="[bold]Worktrees[/bold]", border_style="blue", padding=(0, 1))
+
+
+def build_issues_panel() -> Panel:
+    issues = detect_issues()
+    health = get_health()
+
+    table = Table(expand=True, show_header=True, header_style="bold red", box=None, padding=(0, 1))
+    table.add_column("Sev", width=4)
+    table.add_column("PID", width=7)
+    table.add_column("Issue", width=20)
+    table.add_column("Detail", ratio=1)
+
+    for i in issues[:10]:
+        severity = i.get("severity", "info")
+        if severity == "warn":
+            sev_text = Text("WARN", style="bold red")
+        else:
+            sev_text = Text("INFO", style="dim cyan")
+        table.add_row(
+            sev_text,
+            i.get("session", "—"),
+            Text(i.get("type", "?"), style="bold" if severity == "warn" else ""),
+            i.get("detail", ""),
+        )
+
+    if not issues:
+        table.add_row(
+            Text("OK", style="bold green"), "—", "all-clear",
+            "No issues detected across all sessions",
+        )
+
+    health_parts = [f"{k}: {v}" for k, v in health.items()]
+    health_text = " | ".join(health_parts)
+
+    warn_count = sum(1 for i in issues if i.get("severity") == "warn")
+    title_style = "bold red" if warn_count else "bold green"
+    title = f"[{title_style}]Issues ({warn_count} warnings, {len(issues)} total)[/{title_style}]"
+
+    return Panel(
+        table,
+        title=title,
+        subtitle=f"[dim]{health_text}[/dim]",
+        border_style="red" if warn_count else "green",
+        padding=(0, 1),
+    )
+
+
+def build_dashboard() -> Layout:
+    layout = Layout()
+    layout.split_column(
+        Layout(build_sessions_panel(), name="sessions", size=10),
+        Layout(build_agents_panel(), name="agents", size=12),
+        Layout(build_worktree_panel(), name="worktrees", size=7),
+        Layout(build_tool_usage_panel(), name="tools", size=14),
+        Layout(build_issues_panel(), name="issues", size=14),
+    )
+    return layout
+
+
+def output_json():
+    data = {
+        "timestamp": datetime.datetime.now(datetime.UTC).isoformat() + "Z",
+        "sessions": get_active_sessions(),
+        "session_estimates": get_session_estimates(),
+        "agents": get_subagents(),
+        "agent_events": get_agent_tree_events(),
+        "worktrees": get_worktrees(),
+        "stale_sessions": get_stale_sessions(),
+        "issues": detect_issues(),
+        "alerts": get_alerts(),
+        "health": get_health(),
+    }
+    print(json.dumps(data, indent=2, default=str))
+
+
+def print_issues_detail():
+    """Print expanded issue report with evidence for each finding."""
+    from rich.rule import Rule
+
+    issues = detect_issues()
+    sessions = get_active_sessions()
+
+    pid_info = {}
+    for s in sessions:
+        pid_info[str(s.get("pid", ""))] = s
+
+    warn_count = sum(1 for i in issues if i.get("severity") == "warn")
+    total = len(issues)
+
+    if not issues:
+        console.print(Panel(
+            "[bold green]No issues detected across all sessions.[/bold green]",
+            title="[bold green]Issue Report[/bold green]",
+            border_style="green",
+        ))
+        return
+
+    console.print(Rule(f"[bold]Issue Report — {warn_count} warnings, {total} total[/bold]"))
+    console.print()
+
+    for idx, issue in enumerate(issues, 1):
+        severity = issue.get("severity", "info")
+        itype = issue.get("type", "?")
+        detail = issue.get("detail", "")
+        session = issue.get("session", "—")
+        evidence = issue.get("evidence", [])
+
+        if severity == "warn":
+            sev_tag = "[bold red]WARN[/bold red]"
+            border = "red"
+        else:
+            sev_tag = "[dim cyan]INFO[/dim cyan]"
+            border = "dim"
+
+        s_info = pid_info.get(session, {})
+        title = s_info.get("title", "")
+        cwd = s_info.get("cwd", "")
+        if cwd:
+            cwd = cwd.replace(str(Path.home()), "~")
+
+        header = f"{sev_tag}  [bold]{itype}[/bold]  (PID {session})"
+        if title:
+            header += f"  [dim]— {title[:50]}[/dim]"
+
+        content_parts = [f"[bold]{detail}[/bold]"]
+        if cwd:
+            content_parts.append(f"[dim]CWD: {cwd}[/dim]")
+
+        if evidence:
+            content_parts.append("")
+            content_parts.append("[bold yellow]Evidence:[/bold yellow]")
+            for line in evidence:
+                content_parts.append(f"[dim]{line}[/dim]")
+
+        suggestion = _get_suggestion(itype)
+        if suggestion:
+            content_parts.append("")
+            content_parts.append(f"[bold green]Suggestion:[/bold green] {suggestion}")
+
+        console.print(Panel(
+            "\n".join(content_parts),
+            title=header,
+            border_style=border,
+            padding=(0, 1),
+        ))
+
+    console.print()
+    health = get_health()
+    health_parts = [f"[dim]{k}: {v}[/dim]" for k, v in health.items()]
+    console.print(Rule(f"[dim]Health: {' | '.join(health_parts)}[/dim]"))
+
+
+def _get_suggestion(issue_type: str) -> str:
+    suggestions = {
+        "possible-loop": "Check if an Edit keeps failing. Try a different approach or ask the user to intervene.",
+        "high-error-rate": "Many tool calls are erroring — check permissions, file paths, or syntax.",
+        "high-tokens": "Run /compact to compress context, or start a new session for the next task.",
+        "token-usage": "Context growing — consider /compact soon if the task has more steps.",
+        "no-git": "Start a git repo or work inside an existing one so changes are tracked.",
+        "many-agents": "Review if subagents are completing or spawning redundantly.",
+        "dead-session": "Session file can be cleaned up: rm ~/.claude/sessions/<pid>.json",
+        "stale-cleanup": "Run: find ~/.claude/sessions -name '*.json' -exec sh -c 'kill -0 $(jq -r .pid \"$1\") 2>/dev/null || rm \"$1\"' _ {} \\;",
+        "hook-not-executable": "Fix with: chmod +x ~/.claude/hooks/<name>.sh",
+        "dirty-worktree": "Commit or stash changes, or remove the worktree if work is done.",
+        "tool-error": "Check the error message — may indicate a config, permission, or path issue.",
+        "opus-overkill": "Session is Opus but doing mechanical dogwork — `/model sonnet` will do the same for ~1/5 the cost.",
+    }
+    return suggestions.get(issue_type, "")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Claude Code session & agent monitor")
+    parser.add_argument("--once", action="store_true", help="Print snapshot and exit")
+    parser.add_argument("--issues", action="store_true", help="Detailed issue report with evidence")
+    parser.add_argument("--json", action="store_true", help="JSON output (implies --once)")
+    parser.add_argument("--interval", type=int, default=2, help="Refresh interval in seconds (default: 2)")
+    args = parser.parse_args()
+
+    if args.json:
+        output_json()
+        return
+
+    if args.issues:
+        print_issues_detail()
+        return
+
+    if args.once:
+        console.print(build_sessions_panel())
+        console.print(build_agents_panel())
+        console.print(build_worktree_panel())
+        console.print(build_tool_usage_panel())
+        console.print(build_issues_panel())
+        return
+
+    signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
+
+    console.print("[dim]claude-monitor — press Ctrl+C to exit[/dim]\n")
+    try:
+        with Live(build_dashboard(), console=console, refresh_per_second=1, screen=True) as live:
+            while True:
+                time.sleep(args.interval)
+                live.update(build_dashboard())
+    except KeyboardInterrupt:
+        pass
+
+
+if __name__ == "__main__":
+    main()
